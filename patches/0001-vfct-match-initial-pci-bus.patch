@@ -1,0 +1,146 @@
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_bios.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_bios.c
+index f9315e047..7b66dc241 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_bios.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_bios.c
+@@ -436,10 +436,8 @@ static bool amdgpu_read_disabled_bios(struct amdgpu_device *adev)
+  * VFCT entries contain the PCI bus number as recorded during BIOS POST.
+  * On systems where the kernel renumbers PCI buses (e.g. pci=realloc or
+  * resource conflicts), the runtime bus number may differ from the POST
+- * value.  Match by device identity (vendor + device + function) and use
+- * the bus number as a preference: exact bus match is preferred, but when
+- * the bus numbers disagree we accept the entry if the device identity
+- * matches.
++ * value.  Match using the bus number captured when the device was
++ * discovered, before any bus renumbering.
+  *
+  * Returns: 0 on match, -ENODEV on no match
+  */
+@@ -455,16 +453,7 @@ static int amdgpu_acpi_vfct_match(struct amdgpu_device *adev,
+ 	    vhdr->PCIFunction != PCI_FUNC(adev->pdev->devfn))
+ 		return -ENODEV;
+ 
+-	/* Exact bus number match - preferred */
+-	if (vhdr->PCIBus == adev->pdev->bus->number)
+-		return 0;
+-
+-	/* Bus mismatch but device identity matches (PCI renumbering case) */
+-	dev_notice(adev->dev,
+-		   "VFCT bus number mismatch: table %u != runtime %u, matching by device identity (vendor 0x%04x device 0x%04x)\n",
+-		   vhdr->PCIBus, adev->pdev->bus->number,
+-		   adev->pdev->vendor, adev->pdev->device);
+-	return 0;
++	return vhdr->PCIBus == adev->pdev->initial_bus_number ? 0 : -ENODEV;
+ }
+ 
+ static bool amdgpu_acpi_vfct_bios(struct amdgpu_device *adev)
+diff --git a/drivers/gpu/drm/radeon/radeon_bios.c b/drivers/gpu/drm/radeon/radeon_bios.c
+index 1da6bf1c1..88989c937 100644
+--- a/drivers/gpu/drm/radeon/radeon_bios.c
++++ b/drivers/gpu/drm/radeon/radeon_bios.c
+@@ -609,10 +609,8 @@ static bool radeon_read_disabled_bios(struct radeon_device *rdev)
+  * VFCT entries contain the PCI bus number as recorded during BIOS POST.
+  * On systems where the kernel renumbers PCI buses (e.g. pci=realloc or
+  * resource conflicts), the runtime bus number may differ from the POST
+- * value.  Match by device identity (vendor + device + function) and use
+- * the bus number as a preference: exact bus match is preferred, but when
+- * the bus numbers disagree we accept the entry if the device identity
+- * matches.
++ * value.  Match using the bus number captured when the device was
++ * discovered, before any bus renumbering.
+  *
+  * Returns: 0 on match, -ENODEV on no match
+  */
+@@ -628,16 +626,7 @@ static int radeon_acpi_vfct_match(struct radeon_device *rdev,
+ 	    vhdr->PCIFunction != PCI_FUNC(rdev->pdev->devfn))
+ 		return -ENODEV;
+ 
+-	/* Exact bus number match - preferred */
+-	if (vhdr->PCIBus == rdev->pdev->bus->number)
+-		return 0;
+-
+-	/* Bus mismatch but device identity matches (PCI renumbering case) */
+-	dev_notice(&rdev->pdev->dev,
+-		   "VFCT bus number mismatch: table %u != runtime %u, matching by device identity (vendor 0x%04x device 0x%04x)\n",
+-		   vhdr->PCIBus, rdev->pdev->bus->number,
+-		   rdev->pdev->vendor, rdev->pdev->device);
+-	return 0;
++	return vhdr->PCIBus == rdev->pdev->initial_bus_number ? 0 : -ENODEV;
+ }
+ 
+ static bool radeon_acpi_vfct_bios(struct radeon_device *rdev)
+diff --git a/drivers/pci/probe.c b/drivers/pci/probe.c
+index 9a178e0e5..7b48ffe22 100644
+--- a/drivers/pci/probe.c
++++ b/drivers/pci/probe.c
+@@ -1015,6 +1015,7 @@ static int pci_register_host_bridge(struct pci_host_bridge *bridge)
+ 	bus->sysdata = bridge->sysdata;
+ 	bus->ops = bridge->ops;
+ 	bus->number = bus->busn_res.start = bridge->busnr;
++	bus->initial_bus_number = bus->number;
+ #ifdef CONFIG_PCI_DOMAINS_GENERIC
+ 	if (bridge->domain_nr == PCI_DOMAIN_NR_NOT_SET)
+ 		bus->domain_nr = pci_bus_find_domain_nr(bus, parent);
+@@ -1235,6 +1236,7 @@ static struct pci_bus *pci_alloc_child_bus(struct pci_bus *parent,
+ 
+ 	/* Set up the primary, secondary and subordinate bus numbers */
+ 	child->number = child->busn_res.start = busnr;
++	child->initial_bus_number = busnr;
+ 	child->primary = parent->busn_res.start;
+ 	child->busn_res.end = 0xff;
+ 
+@@ -1473,6 +1475,7 @@ static int pci_scan_bridge_extend(struct pci_bus *bus, struct pci_dev *dev,
+ 			child = pci_add_new_bus(bus, dev, secondary);
+ 			if (!child)
+ 				goto out;
++			child->initial_bus_number = secondary;
+ 			child->primary = primary;
+ 			pci_bus_insert_busn_res(child, secondary, subordinate);
+ 			child->bridge_ctl = bctl;
+@@ -1494,6 +1497,8 @@ static int pci_scan_bridge_extend(struct pci_bus *bus, struct pci_dev *dev,
+ 		 * do in the second pass.
+ 		 */
+ 		if (!pass) {
++			if (!dev->initial_secondary_bus_number)
++				dev->initial_secondary_bus_number = secondary;
+ 			if (pcibios_assign_all_busses() || broken)
+ 
+ 				/*
+@@ -1529,6 +1534,9 @@ static int pci_scan_bridge_extend(struct pci_bus *bus, struct pci_dev *dev,
+ 			child = pci_add_new_bus(bus, dev, next_busnr);
+ 			if (!child)
+ 				goto out;
++			if (dev->initial_secondary_bus_number)
++				child->initial_bus_number =
++					dev->initial_secondary_bus_number;
+ 			pci_bus_insert_busn_res(child, next_busnr,
+ 						bus->busn_res.end);
+ 		}
+@@ -2515,6 +2523,7 @@ struct pci_dev *pci_alloc_dev(struct pci_bus *bus)
+ 	INIT_LIST_HEAD(&dev->bus_list);
+ 	dev->dev.type = &pci_dev_type;
+ 	dev->bus = pci_bus_get(bus);
++	dev->initial_bus_number = bus ? bus->initial_bus_number : 0;
+ 	dev->driver_exclusive_resource = (struct resource) {
+ 		.name = "PCI Exclusive",
+ 		.start = 0,
+diff --git a/include/linux/pci.h b/include/linux/pci.h
+index aa3765a20..7dbb06837 100644
+--- a/include/linux/pci.h
++++ b/include/linux/pci.h
+@@ -363,6 +363,8 @@ struct pci_dev {
+ 	struct pci_slot	*slot;		/* Physical slot this device is in */
+ 
+ 	unsigned int	devfn;		/* Encoded device & function index */
++	u8		initial_bus_number;	/* Bus number when device was discovered */
++	u8		initial_secondary_bus_number;	/* Bus number behind this bridge */
+ 	unsigned short	vendor;
+ 	unsigned short	device;
+ 	unsigned short	subsystem_vendor;
+@@ -727,6 +729,7 @@ struct pci_bus {
+ 	struct proc_dir_entry *procdir;	/* Directory entry in /proc/bus/pci */
+ 
+ 	unsigned char	number;		/* Bus number */
++	unsigned char	initial_bus_number;	/* Bus number before reassignment */
+ 	unsigned char	primary;	/* Number of primary bridge */
+ 	unsigned char	max_bus_speed;	/* enum pci_bus_speed */
+ 	unsigned char	cur_bus_speed;	/* enum pci_bus_speed */
