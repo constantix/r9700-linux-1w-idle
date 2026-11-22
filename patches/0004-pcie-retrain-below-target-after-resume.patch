@@ -1,0 +1,72 @@
+diff --git a/drivers/pci/pcie/bwctrl.c b/drivers/pci/pcie/bwctrl.c
+index d48021bfd..da251ebae 100644
+--- a/drivers/pci/pcie/bwctrl.c
++++ b/drivers/pci/pcie/bwctrl.c
+@@ -157,6 +157,38 @@ int pcie_set_target_speed(struct pci_dev *port, enum pci_bus_speed speed_req,
+ 	return ret;
+ }
+ 
++/*
++ * After D3hot runtime resume the link can come up below Target Link Speed
++ * with no AER and no bandwidth IRQ. Retrain if the link is up but slower
++ * than TLS; this is the same recovery as setting Retrain Link in software.
++ */
++static void pcie_bwnotif_restore_target_speed(struct pci_dev *port)
++{
++	u16 lnksta, lnkctl2;
++	enum pci_bus_speed cur, tgt;
++
++	if (!port->subordinate)
++		return;
++	if (pcie_capability_read_word(port, PCI_EXP_LNKSTA, &lnksta) !=
++	    PCIBIOS_SUCCESSFUL)
++		return;
++	if (!(lnksta & PCI_EXP_LNKSTA_DLLLA))
++		return;
++	if (pcie_capability_read_word(port, PCI_EXP_LNKCTL2, &lnkctl2) !=
++	    PCIBIOS_SUCCESSFUL)
++		return;
++
++	cur = pcie_link_speed[lnksta & PCI_EXP_LNKSTA_CLS];
++	tgt = PCIE_LNKCTL2_TLS2SPEED(lnkctl2);
++	if (cur == PCI_SPEED_UNKNOWN || tgt == PCI_SPEED_UNKNOWN || cur >= tgt)
++		return;
++
++	pci_info(port, "link at %s after resume, retraining toward %s\n",
++		 pci_speed_string(cur), pci_speed_string(tgt));
++	if (pcie_retrain_link(port, false))
++		pci_info(port, "resume retrain failed\n");
++}
++
+ static void pcie_bwnotif_enable(struct pcie_device *srv)
+ {
+ 	struct pci_dev *port = srv->port;
+@@ -178,6 +210,7 @@ static void pcie_bwnotif_enable(struct pcie_device *srv)
+ 	 * link speed is up to date.
+ 	 */
+ 	pcie_update_link_speed(port->subordinate, PCIE_BWCTRL_ENABLE);
++	pcie_bwnotif_restore_target_speed(port);
+ }
+ 
+ static void pcie_bwnotif_disable(struct pci_dev *port)
+@@ -294,6 +327,12 @@ static int pcie_bwnotif_resume(struct pcie_device *srv)
+ 	return 0;
+ }
+ 
++static int pcie_bwnotif_runtime_resume(struct pcie_device *srv)
++{
++	pcie_bwnotif_enable(srv);
++	return 0;
++}
++
+ static struct pcie_port_service_driver pcie_bwctrl_driver = {
+ 	.name		= "pcie_bwctrl",
+ 	.port_type	= PCIE_ANY_PORT,
+@@ -301,6 +340,7 @@ static struct pcie_port_service_driver pcie_bwctrl_driver = {
+ 	.probe		= pcie_bwnotif_probe,
+ 	.suspend	= pcie_bwnotif_suspend,
+ 	.resume		= pcie_bwnotif_resume,
++	.runtime_resume	= pcie_bwnotif_runtime_resume,
+ 	.remove		= pcie_bwnotif_remove,
+ };
+ 
