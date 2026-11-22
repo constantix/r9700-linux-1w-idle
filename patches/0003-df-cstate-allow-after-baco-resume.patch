@@ -1,0 +1,29 @@
+diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c
+index 53f05ee71..d73d67e8c 100644
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_device.c
+@@ -4777,6 +4777,24 @@ int amdgpu_device_resume(struct drm_device *dev, bool notify_clients)
+ 		goto exit;
+ 	}
+ 
++	/*
++	 * Local diagnostic only: suspend phase 1 disallows DF C-state, but
++	 * normal runtime resume does not send the matching allow. Apply the
++	 * test to AMD PCI device 7551 after BACO runtime resume; this covers
++	 * the R9700 cards on this system regardless of board vendor or BDF.
++	 */
++	if (adev->in_runpm && !adev->no_hw_access &&
++	    adev->pm.rpm_mode == AMDGPU_RUNPM_BACO &&
++	    adev->pdev->vendor == PCI_VENDOR_ID_ATI &&
++	    adev->pdev->device == 0x7551) {
++		int df_ret = amdgpu_dpm_set_df_cstate(adev, DF_CSTATE_ALLOW);
++
++		if (df_ret)
++			dev_warn(adev->dev, "DF-Cstate runtime test: allow failed (%d)\n", df_ret);
++		else
++			dev_info(adev->dev, "DF-Cstate runtime test: allow succeeded\n");
++	}
++
+ 	r = amdgpu_amdkfd_resume(adev, !amdgpu_sriov_vf(adev) && !adev->in_runpm);
+ 	if (r)
+ 		goto exit;
